@@ -5,20 +5,56 @@ import numpy as np
 import joblib
 import plotly.express as px
 from pathlib import Path
+import os
 
-# --- Paths (relative to this file)
-ROOT = Path(__file__).resolve().parents[1]               # Predicting_Employee_Attrition/
-MODELS_DIR = ROOT / "Models"
+# ---------- Robust paths + diagnostics ----------
+APP_DIR = Path(__file__).resolve().parent          # /.../App
+ROOT    = APP_DIR.parent                           # repo root
+MODELS_DIR   = ROOT / "Models"
 DATASETS_DIR = ROOT / "Datasets"
 
+# If your filenames differ, edit these names only:
 MODEL_PATH   = MODELS_DIR / "logreg_model.pkl"
 SCALER_PATH  = MODELS_DIR / "scaler.pkl"
 COLUMNS_PATH = MODELS_DIR / "X_columns.pkl"
-SAMPLE_CSV   = DATASETS_DIR / "Employee Records.csv"
+SAMPLE_CSV   = DATASETS_DIR / "Employee Records.csv"  # change if your CSV has a different name
+
+# Minimal diagnostics shown in sidebar (very helpful on Streamlit Cloud)
+with st.sidebar:
+    st.caption("Debug Info")
+    st.write("App dir:", str(APP_DIR))
+    st.write("Repo root:", str(ROOT))
+    st.write("Models dir exists:", MODELS_DIR.exists())
+    st.write("Datasets dir exists:", DATASETS_DIR.exists())
+    try:
+        if MODELS_DIR.exists():
+            st.write("Models files:", [p.name for p in MODELS_DIR.iterdir()])
+        if DATASETS_DIR.exists():
+            st.write("Datasets files:", [p.name for p in DATASETS_DIR.iterdir()])
+    except Exception:
+        pass
+
+def _require(p: Path, label: str):
+    if not p.exists():
+        st.error(f"❌ Missing {label}: `{p}`. Check exact name and folder case.")
+        st.stop()
+
+@st.cache_resource
+def load_artifacts():
+    _require(MODEL_PATH, "model.pkl")
+    _require(SCALER_PATH, "scaler.pkl")
+    _require(COLUMNS_PATH, "X_columns.pkl")
+    model   = joblib.load(MODEL_PATH)
+    scaler  = joblib.load(SCALER_PATH)
+    columns = joblib.load(COLUMNS_PATH)
+    return model, scaler, columns
+
+# --- Load model artifacts once
+model, scaler, FEATURE_COLS = load_artifacts()
 
 # --- Page config
 st.set_page_config(
-    page_title="HR Attrition Risk Suite",
+    page_title="HR Attrition Risk Suite — Aisha Mohammed",
     page_icon="🛡️",
     layout="wide"
 )
@@ -26,27 +62,16 @@ st.set_page_config(
 # --- Minimal CSS polish
 st.markdown("""
 <style>
-    .metric-card {padding:1rem;border-radius:12px;border:1px solid #262730;background: #0e1117;}
+    .metric-card {padding:1rem;border-radius:12px;border:1px solid #262730;background:#0e1117;}
     .good {color:#22c55e;font-weight:600;}
     .warn {color:#f59e0b;font-weight:600;}
     .bad  {color:#ef4444;font-weight:600;}
-    .section-title {font-size:1.3rem;font-weight:700;margin: 0.5rem 0 0.25rem 0;}
+    .section-title {font-size:1.3rem;font-weight:700;margin:0.5rem 0 0.25rem 0;}
     .subtle {color:#9aa0a6;font-size:0.9rem;}
 </style>
 """, unsafe_allow_html=True)
 
 # --- Helpers
-@st.cache_resource
-def load_artifacts():
-    try:
-        model   = joblib.load(MODEL_PATH)
-        scaler  = joblib.load(SCALER_PATH)
-        columns = joblib.load(COLUMNS_PATH)
-    except FileNotFoundError as e:
-        st.error(f"❌ Could not find a required artifact: {e}")
-        st.stop()
-    return model, scaler, columns
-
 def preprocess(df_raw: pd.DataFrame, feature_cols) -> np.ndarray:
     """Align columns + one-hot encode to match training schema."""
     df = pd.get_dummies(df_raw, drop_first=False)
@@ -56,7 +81,7 @@ def preprocess(df_raw: pd.DataFrame, feature_cols) -> np.ndarray:
             df[c] = 0
     # drop extra columns not in training
     df = df[feature_cols]
-    # numeric only to scaler (if you trained with scaler on full feature matrix this is fine)
+    # numeric matrix for scaler (trained on full feature matrix)
     X = df.values
     return X
 
@@ -64,12 +89,9 @@ def predict_single(payload: dict, model, scaler, feature_cols, threshold: float 
     raw = pd.DataFrame([payload])
     X = preprocess(raw, feature_cols)
     Xs = scaler.transform(X)
-    prob = float(model.predict_proba(Xs)[:,1][0])
+    prob = float(model.predict_proba(Xs)[:, 1][0])
     label = "Likely to Exit" if prob >= threshold else "Likely to Stay"
     return prob, label
-
-# --- Load model artifacts once
-model, scaler, FEATURE_COLS = load_artifacts()
 
 # --- Sidebar navigation
 st.sidebar.title("HR Attrition")
@@ -83,11 +105,10 @@ if section == "Overview":
     st.title("HR Attrition Risk Suite")
     st.subheader("Leverage analytics to predict, analyze, and mitigate employee attrition risks across your organization.")
 
-    # If you have a company-wide snapshot (optional), synthesize from sample or let user upload
+    # If you have a company-wide snapshot (optional), use CSV; else synthesize a small demo dataframe
     if SAMPLE_CSV.exists():
         df_org = pd.read_csv(SAMPLE_CSV)
     else:
-        # Minimal demo synthetic data if sample file is missing
         np.random.seed(7)
         depts = ["Sales","Engineering","Marketing","HR","Finance","Operations"]
         df_org = pd.DataFrame({
@@ -99,9 +120,9 @@ if section == "Overview":
         })
 
     # Score the org quickly (rough estimate)
-    X = preprocess(pd.get_dummies(df_org), FEATURE_COLS)
+    X  = preprocess(df_org, FEATURE_COLS)       # FIX: don't call get_dummies() here; preprocess handles it
     Xs = scaler.transform(X)
-    probs = model.predict_proba(Xs)[:,1]
+    probs = model.predict_proba(Xs)[:, 1]
     df_org["Exit_Probability"] = probs
     df_org["High_Risk"] = (probs >= 0.5).astype(int)
 
@@ -119,7 +140,7 @@ if section == "Overview":
                     f'<div style="font-size:2rem;font-weight:800;">{avg_prob*100:.1f}%</div>'
                     '<div class="subtle">organization average</div></div>', unsafe_allow_html=True)
     with col3:
-        color = "bad" if high_risk/total_emp >= 0.25 else "warn"
+        color = "bad" if total_emp and (high_risk/total_emp) >= 0.25 else "warn"
         st.markdown(f'<div class="metric-card"><div class="section-title">High-Risk Employees</div>'
                     f'<div style="font-size:2rem;font-weight:800;" class="{color}">{high_risk}</div>'
                     '<div class="subtle">≥ 50% exit probability</div></div>', unsafe_allow_html=True)
@@ -170,9 +191,9 @@ elif section == "Batch Scoring":
     if uploaded:
         df_raw = pd.read_csv(uploaded)
         st.write("Preview", df_raw.head())
-        X = preprocess(pd.get_dummies(df_raw), FEATURE_COLS)
+        X  = preprocess(df_raw, FEATURE_COLS)    # FIX: preprocess handles dummies
         Xs = scaler.transform(X)
-        probs = model.predict_proba(Xs)[:,1]
+        probs = model.predict_proba(Xs)[:, 1]
         out = df_raw.copy()
         out["Exit_Probability"] = probs.round(4)
         out["Prediction"] = np.where(out["Exit_Probability"] >= threshold, "Likely to Exit", "Likely to Stay")
@@ -185,7 +206,6 @@ elif section == "Department Insights":
     st.title("Department Insights")
     st.caption("Analyze risk patterns and trends across departments.")
 
-    # Use sample/org df like in Overview
     if SAMPLE_CSV.exists():
         df_org = pd.read_csv(SAMPLE_CSV)
     else:
@@ -200,17 +220,17 @@ elif section == "Department Insights":
         })
 
     # Score
-    X = preprocess(pd.get_dummies(df_org), FEATURE_COLS)
+    X  = preprocess(df_org, FEATURE_COLS)        # FIX: preprocess handles dummies
     Xs = scaler.transform(X)
-    probs = model.predict_proba(Xs)[:,1]
+    probs = model.predict_proba(Xs)[:, 1]
     df_org["Exit_Probability"] = probs
     df_org["High_Risk"] = (probs >= 0.5).astype(int)
 
     # Bar: average exit probability by department
     dep = (df_org.groupby("Department", as_index=False)
-                 .agg(Avg_Exit_Prob=("Exit_Probability","mean"),
-                      Employees=("Exit_Probability","size"),
-                      High_Risk=("High_Risk","sum")))
+                 .agg(Avg_Exit_Prob=("Exit_Probability", "mean"),
+                      Employees=("Exit_Probability", "size"),
+                      High_Risk=("High_Risk", "sum")))
     dep = dep.sort_values("Avg_Exit_Prob", ascending=False)
 
     fig = px.bar(dep, x="Department", y="Avg_Exit_Prob",
@@ -225,9 +245,9 @@ elif section == "Department Insights":
     risky = dep.head(2)["Department"].tolist()
     safe  = dep.tail(1)["Department"].tolist()
     recs = [
-        f"Focus retention efforts on **{risky[0]}** (highest risk).",
+        f"Focus retention efforts on **{risky[0]}** (highest risk)." if len(risky) > 0 else "",
         f"Investigate factors contributing to **{risky[1]}** turnover." if len(risky) > 1 else "",
-        f"Leverage **{safe[0]}**’s low turnover best practices." if safe else "",
+        f"Leverage **{safe[0]}**’s low turnover best practices." if len(safe) > 0 else "",
         "Implement targeted interventions for high-risk employees."
     ]
     for r in recs:
