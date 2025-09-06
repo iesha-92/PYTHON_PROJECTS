@@ -1,219 +1,235 @@
-# app.py
-from pathlib import Path
-import joblib, numpy as np, pandas as pd
+# --- Imports
 import streamlit as st
+import pandas as pd
+import numpy as np
+import joblib
 import plotly.express as px
-import plotly.graph_objects as go
+from pathlib import Path
 
-# ---------- Page setup ----------
+# --- Paths (relative to this file)
+ROOT = Path(__file__).resolve().parents[1]               # Predicting_Employee_Attrition/
+MODELS_DIR = ROOT / "Models"
+DATASETS_DIR = ROOT / "Datasets"
+
+MODEL_PATH   = MODELS_DIR / "logreg_model.pkl"
+SCALER_PATH  = MODELS_DIR / "scaler.pkl"
+COLUMNS_PATH = MODELS_DIR / "X_columns.pkl"
+SAMPLE_CSV   = DATASETS_DIR / "Employee Records.csv"
+
+# --- Page config
 st.set_page_config(
     page_title="HR Attrition Risk Suite",
-    page_icon="🧭",
+    page_icon="🛡️",
     layout="wide"
 )
 
-# ---------- Locate artifacts robustly ----------
-def find_path(*parts):
-    """Join parts relative to this file, falling back to repo root."""
-    here = Path(__file__).resolve()
-    candidates = [
-        here.parent.joinpath(*parts),                  # ./Models/...
-        here.parent.parent.joinpath(*parts),           # ./App/Models/... (if app.py inside /App)
-        here.parents[2].joinpath(*parts) if len(here.parents) > 2 else None  # fallback
-    ]
-    for p in candidates:
-        if p and p.exists():
-            return p
-    return candidates[0]  # default first even if missing (error will be shown nicely)
+# --- Minimal CSS polish
+st.markdown("""
+<style>
+    .metric-card {padding:1rem;border-radius:12px;border:1px solid #262730;background: #0e1117;}
+    .good {color:#22c55e;font-weight:600;}
+    .warn {color:#f59e0b;font-weight:600;}
+    .bad  {color:#ef4444;font-weight:600;}
+    .section-title {font-size:1.3rem;font-weight:700;margin: 0.5rem 0 0.25rem 0;}
+    .subtle {color:#9aa0a6;font-size:0.9rem;}
+</style>
+""", unsafe_allow_html=True)
 
-@st.cache_resource(show_spinner=False)
+# --- Helpers
+@st.cache_resource
 def load_artifacts():
-    models_dir = None
-    # Try common locations
-    for rel in ("Models", "App/Models", "Predicting_Employee_Attrition/Models"):
-        p = find_path(rel)
-        if p and p.exists():
-            models_dir = p
-            break
-    if models_dir is None:
-        raise FileNotFoundError("Could not find the Models/ folder.")
+    try:
+        model   = joblib.load(MODEL_PATH)
+        scaler  = joblib.load(SCALER_PATH)
+        columns = joblib.load(COLUMNS_PATH)
+    except FileNotFoundError as e:
+        st.error(f"❌ Could not find a required artifact: {e}")
+        st.stop()
+    return model, scaler, columns
 
-    model   = joblib.load(models_dir / "logreg_model.pkl")
-    scaler  = joblib.load(models_dir / "scaler.pkl")
-    columns = joblib.load(models_dir / "X_columns.pkl")
-    return model, scaler, columns, models_dir
-
-# ---------- Helpers ----------
-NUMERIC_COLS = ["Age", "Salary", "Years of Service"]
-DEFAULTS = {"Age": 35, "Salary": 65000, "Years of Service": 5}
-CATEGORICALS = {
-    "Department": ["HR","Billing","Sales & Marketing","Data Analytics","Operations","IT","Finance","Admin"],
-    "Job Title": ["Data Scientist","Product Manager","Software Developer","Project Manager","HR Analyst","Customer Support Agent"],
-    "Gender": ["Female","Male"],
-    "Marital Status": ["Single","Married"]
-}
-
-def preprocess_df(df_raw: pd.DataFrame, feature_cols, scaler):
-    df = df_raw.copy()
-    # keep only known columns (others will be ignored)
-    # one-hot encode categoricals
-    df = pd.get_dummies(df, drop_first=False)
-    # add any missing one-hot columns (from training)
+def preprocess(df_raw: pd.DataFrame, feature_cols) -> np.ndarray:
+    """Align columns + one-hot encode to match training schema."""
+    df = pd.get_dummies(df_raw, drop_first=False)
+    # add any missing columns
     for c in feature_cols:
         if c not in df.columns:
             df[c] = 0
-    # enforce column order
+    # drop extra columns not in training
     df = df[feature_cols]
-    # scale numeric columns that exist in features
-    to_scale = [c for c in NUMERIC_COLS if c in df.columns]
-    if to_scale:
-        df[to_scale] = scaler.transform(df[to_scale].values)
-    return df
+    # numeric only to scaler (if you trained with scaler on full feature matrix this is fine)
+    X = df.values
+    return X
 
-def predict_one(payload: dict, model, scaler, feature_cols):
+def predict_single(payload: dict, model, scaler, feature_cols, threshold: float = 0.5):
     raw = pd.DataFrame([payload])
-    X   = preprocess_df(raw, feature_cols, scaler)
-    prob = float(model.predict_proba(X)[0,1])
-    label = "Likely to Exit" if prob >= 0.5 else "Likely to Stay"
+    X = preprocess(raw, feature_cols)
+    Xs = scaler.transform(X)
+    prob = float(model.predict_proba(Xs)[:,1][0])
+    label = "Likely to Exit" if prob >= threshold else "Likely to Stay"
     return prob, label
 
-# ---------- Sidebar ----------
-st.sidebar.title("Navigation")
+# --- Load model artifacts once
+model, scaler, FEATURE_COLS = load_artifacts()
+
+# --- Sidebar navigation
+st.sidebar.title("HR Attrition")
+st.sidebar.caption("Predict and analyze employee attrition risk with advanced analytics and insights.")
+section = st.sidebar.radio("NAVIGATION", ["Overview", "Single Prediction", "Batch Scoring", "Department Insights"])
+st.sidebar.markdown("—")
 st.sidebar.caption("Built by **Aisha Mohammed**")
-st.sidebar.markdown(
-    """
-**Project**: HR Attrition Risk Suite  
-Predict exit probability, score CSVs, and visualize risk by department.
 
-**Model**: Logistic Regression  
-**Tech**: scikit-learn, Streamlit, Plotly  
-    """
-)
-with st.sidebar.expander("Need a sample CSV?"):
-    sample = pd.DataFrame({
-        "Department":["HR","IT"],
-        "Job Title":["HR Analyst","Software Developer"],
-        "Gender":["Female","Male"],
-        "Marital Status":["Single","Married"],
-        "Age":[28,32],
-        "Years of Service":[2,4],
-        "Salary":[42000,78000]
-    })
-    st.download_button("Download sample.csv", sample.to_csv(index=False), "sample.csv", "text/csv")
+# ====== OVERVIEW =============================================================
+if section == "Overview":
+    st.title("HR Attrition Risk Suite")
+    st.subheader("Leverage analytics to predict, analyze, and mitigate employee attrition risks across your organization.")
 
-# ---------- Load artifacts ----------
-try:
-    model, scaler, FEATURE_COLS, MODELS_DIR = load_artifacts()
-    st.toast("Artifacts loaded successfully.", icon="✅")
-except Exception as e:
-    st.error(f"Could not load artifacts.\n\n{e}")
-    st.stop()
+    # If you have a company-wide snapshot (optional), synthesize from sample or let user upload
+    if SAMPLE_CSV.exists():
+        df_org = pd.read_csv(SAMPLE_CSV)
+    else:
+        # Minimal demo synthetic data if sample file is missing
+        np.random.seed(7)
+        depts = ["Sales","Engineering","Marketing","HR","Finance","Operations"]
+        df_org = pd.DataFrame({
+            "Department": np.random.choice(depts, 392, p=[.25,.28,.1,.1,.12,.15]),
+            "Gender": np.random.choice(["Male","Female"], 392),
+            "Age": np.random.randint(21, 60, 392),
+            "Years of Service": np.random.randint(0, 12, 392),
+            "Salary": np.random.randint(25000, 180000, 392)
+        })
 
-# ---------- Header ----------
-st.markdown(
-    """
-# HR Attrition Risk Suite
-*Predict exit probability, score CSVs, and view department-level risk.*
-"""
-)
+    # Score the org quickly (rough estimate)
+    X = preprocess(pd.get_dummies(df_org), FEATURE_COLS)
+    Xs = scaler.transform(X)
+    probs = model.predict_proba(Xs)[:,1]
+    df_org["Exit_Probability"] = probs
+    df_org["High_Risk"] = (probs >= 0.5).astype(int)
 
-# ---------- Tabs ----------
-tab_overview, tab_single, tab_batch, tab_insights = st.tabs(
-    ["Overview", "Single Prediction", "Batch Scoring", "Department Insights"]
-)
+    total_emp = len(df_org)
+    avg_prob  = df_org["Exit_Probability"].mean()
+    high_risk = int(df_org["High_Risk"].sum())
 
-with tab_overview:
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        st.markdown('<div class="metric-card"><div class="section-title">Total Employees</div>'
+                    f'<div style="font-size:2rem;font-weight:800;">{total_emp:,}</div>'
+                    '<div class="subtle">active across departments</div></div>', unsafe_allow_html=True)
+    with col2:
+        st.markdown('<div class="metric-card"><div class="section-title">Avg Exit Probability</div>'
+                    f'<div style="font-size:2rem;font-weight:800;">{avg_prob*100:.1f}%</div>'
+                    '<div class="subtle">organization average</div></div>', unsafe_allow_html=True)
+    with col3:
+        color = "bad" if high_risk/total_emp >= 0.25 else "warn"
+        st.markdown(f'<div class="metric-card"><div class="section-title">High-Risk Employees</div>'
+                    f'<div style="font-size:2rem;font-weight:800;" class="{color}">{high_risk}</div>'
+                    '<div class="subtle">≥ 50% exit probability</div></div>', unsafe_allow_html=True)
+
+    st.markdown("### Key Sections")
     c1, c2, c3 = st.columns(3)
-    c1.metric("Model", "Logistic Regression")
-    c2.metric("Frameworks", "scikit-learn / Streamlit")
-    c3.metric("Artifacts Folder", MODELS_DIR.name)
+    c1.info("**Single Prediction** — analyze one employee’s risk.")
+    c2.info("**Batch Scoring** — upload CSV and download scored results.")
+    c3.info("**Department Insights** — visualize risk by department.")
 
-    st.markdown("### What’s inside")
-    st.markdown(
-        """
-- **Single Prediction** — enter details to predict one employee’s attrition risk  
-- **Batch Scoring** — upload a CSV and download results with predicted probability  
-- **Department Insights** — average risk by department  
-        """
-    )
+# ====== SINGLE PREDICTION ====================================================
+elif section == "Single Prediction":
+    st.title("Single Employee Prediction")
 
-with tab_single:
-    st.subheader("Single Prediction")
-    with st.form("single_form"):
-        colA, colB, colC = st.columns(3)
-        with colA:
-            dept = st.selectbox("Department", CATEGORICALS["Department"])
-            job  = st.selectbox("Job Title", CATEGORICALS["Job Title"])
-        with colB:
-            gender = st.selectbox("Gender", CATEGORICALS["Gender"])
-            ms     = st.selectbox("Marital Status", CATEGORICALS["Marital Status"])
-        with colC:
-            age    = st.number_input("Age", 18, 75, DEFAULTS["Age"])
-            yos    = st.number_input("Years of Service", 0, 40, DEFAULTS["Years of Service"])
-            salary = st.number_input("Salary", 0, 300000, DEFAULTS["Salary"])
-        thresh = st.slider("Decision threshold", 0.05, 0.95, 0.50, 0.05)
-        submitted = st.form_submit_button("Predict")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        dept = st.selectbox("Department", ["HR","Billing","Sales & Marketing","Data Analytics",
+                                           "Operations","IT","Finance","Admin"])
+        job_title = st.text_input("Job Title", "Data Analyst")
+        gender = st.selectbox("Gender", ["Female","Male"])
+    with c2:
+        age = st.number_input("Age", 18, 75, 30)
+        yos = st.number_input("Years of Service", 0, 40, 3)
+        salary = st.number_input("Annual Salary ($)", 10000, 300000, 60000, step=1000)
+    with c3:
+        threshold = st.slider("Decision threshold", 0.10, 0.90, 0.50, 0.05)
+        st.caption("Lower threshold = more sensitive; higher = more strict.")
 
-    if submitted:
+    if st.button("Predict Attrition Risk", type="primary"):
         payload = {
-            "Department": dept, "Job Title": job,
-            "Gender": gender, "Marital Status": ms,
+            "Department": dept, "Job Title": job_title, "Gender": gender,
             "Age": age, "Years of Service": yos, "Salary": salary
         }
-        prob, label = predict_one(payload, model, scaler, FEATURE_COLS)
-
+        prob, label = predict_single(payload, model, scaler, FEATURE_COLS, threshold)
+        st.success("Prediction complete")
         k1, k2 = st.columns(2)
-        k1.metric("Exit Probability", f"{prob:.2%}")
+        k1.metric("Exit Probability", f"{prob*100:.1f}%")
         k2.metric("Prediction", label)
 
-        # nice gauge
-        fig = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=prob*100,
-            number={'suffix': "%"},
-            title={'text': "Exit Probability"},
-            gauge={'axis': {'range': [0,100]},
-                   'bar': {'thickness': 0.3},
-                   'steps': [
-                       {'range':[0, 40], 'color':"#1f77b4"},
-                       {'range':[40,60], 'color':"#ffbf00"},
-                       {'range':[60,100], 'color':"#d62728"},
-                   ]}
-        ))
-        st.plotly_chart(fig, use_container_width=True)
+# ====== BATCH SCORING ========================================================
+elif section == "Batch Scoring":
+    st.title("Batch Scoring")
+    st.caption("Upload a CSV with columns like Department, Job Title, Gender, Age, Years of Service, Salary.")
 
-with tab_batch:
-    st.subheader("Batch Scoring (CSV)")
-    st.caption("CSV must include: Department, Job Title, Gender, Marital Status, Age, Years of Service, Salary")
-    up = st.file_uploader("Upload CSV", type=["csv"])
-    if up:
-        df_raw = pd.read_csv(up)
-        st.markdown("**Preview**")
-        st.dataframe(df_raw.head(), use_container_width=True)
-        thresh_b = st.slider("Decision threshold", 0.05, 0.95, 0.50, 0.05, key="th_b")
-        if st.button("Score file"):
-            X = preprocess_df(df_raw, FEATURE_COLS, scaler)
-            probs = model.predict_proba(X)[:,1]
-            out = df_raw.copy()
-            out["Exit_Probability"] = probs.round(4)
-            out["Prediction"] = np.where(out["Exit_Probability"] >= thresh_b, "Likely to Exit", "Likely to Stay")
-            st.success("Scoring complete")
-            st.dataframe(out.head(), use_container_width=True)
-            st.download_button("Download scored CSV", out.to_csv(index=False).encode(), "scored_employees.csv", "text/csv")
+    uploaded = st.file_uploader("Upload CSV", type=["csv"])
+    threshold = st.slider("Decision threshold", 0.10, 0.90, 0.50, 0.05, key="thresh_batch")
 
-with tab_insights:
-    st.subheader("Department Insights")
-    st.caption("Upload the scored CSV generated in the Batch tab to see average risk by department.")
-    g = st.file_uploader("Upload scored CSV", type=["csv"], key="insights")
-    if g is not None:
-        df = pd.read_csv(g)
-        need = {"Department","Exit_Probability"}
-        if need.issubset(df.columns):
-            agg = df.groupby("Department", as_index=False)["Exit_Probability"].mean().sort_values("Exit_Probability", ascending=False)
-            fig = px.bar(agg, x="Exit_Probability", y="Department",
-                         orientation="h", title="Average Exit Probability by Department",
-                         text="Exit_Probability")
-            fig.update_layout(xaxis_title="Avg Probability", yaxis_title="", uniformtext_minsize=10, uniformtext_mode='hide')
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.warning("File must include 'Department' and 'Exit_Probability'.")
+    if uploaded:
+        df_raw = pd.read_csv(uploaded)
+        st.write("Preview", df_raw.head())
+        X = preprocess(pd.get_dummies(df_raw), FEATURE_COLS)
+        Xs = scaler.transform(X)
+        probs = model.predict_proba(Xs)[:,1]
+        out = df_raw.copy()
+        out["Exit_Probability"] = probs.round(4)
+        out["Prediction"] = np.where(out["Exit_Probability"] >= threshold, "Likely to Exit", "Likely to Stay")
+        st.success("Scoring complete")
+        st.dataframe(out.head(20), use_container_width=True)
+        st.download_button("Download scored CSV", out.to_csv(index=False).encode(), "scored_employees.csv", "text/csv")
+
+# ====== DEPARTMENT INSIGHTS ==================================================
+elif section == "Department Insights":
+    st.title("Department Insights")
+    st.caption("Analyze risk patterns and trends across departments.")
+
+    # Use sample/org df like in Overview
+    if SAMPLE_CSV.exists():
+        df_org = pd.read_csv(SAMPLE_CSV)
+    else:
+        np.random.seed(7)
+        depts = ["Sales","Engineering","Marketing","HR","Finance","Operations"]
+        df_org = pd.DataFrame({
+            "Department": np.random.choice(depts, 392, p=[.25,.28,.1,.1,.12,.15]),
+            "Gender": np.random.choice(["Male","Female"], 392),
+            "Age": np.random.randint(21, 60, 392),
+            "Years of Service": np.random.randint(0, 12, 392),
+            "Salary": np.random.randint(25000, 180000, 392)
+        })
+
+    # Score
+    X = preprocess(pd.get_dummies(df_org), FEATURE_COLS)
+    Xs = scaler.transform(X)
+    probs = model.predict_proba(Xs)[:,1]
+    df_org["Exit_Probability"] = probs
+    df_org["High_Risk"] = (probs >= 0.5).astype(int)
+
+    # Bar: average exit probability by department
+    dep = (df_org.groupby("Department", as_index=False)
+                 .agg(Avg_Exit_Prob=("Exit_Probability","mean"),
+                      Employees=("Exit_Probability","size"),
+                      High_Risk=("High_Risk","sum")))
+    dep = dep.sort_values("Avg_Exit_Prob", ascending=False)
+
+    fig = px.bar(dep, x="Department", y="Avg_Exit_Prob",
+                 text="Avg_Exit_Prob", title="Average Exit Probability by Department",
+                 labels={"Avg_Exit_Prob":"Avg Exit Probability"})
+    fig.update_traces(texttemplate="%{text:.1%}", textposition="outside")
+    fig.update_layout(yaxis_tickformat=".0%")
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Quick recommendations (toy rules)
+    st.markdown("### Key Insights & Recommendations")
+    risky = dep.head(2)["Department"].tolist()
+    safe  = dep.tail(1)["Department"].tolist()
+    recs = [
+        f"Focus retention efforts on **{risky[0]}** (highest risk).",
+        f"Investigate factors contributing to **{risky[1]}** turnover." if len(risky) > 1 else "",
+        f"Leverage **{safe[0]}**’s low turnover best practices." if safe else "",
+        "Implement targeted interventions for high-risk employees."
+    ]
+    for r in recs:
+        if r:
+            st.warning(r)
