@@ -13,7 +13,11 @@ This repository contains Python projects and scripts that showcase my work in da
 
 ## Repository structure
 
-├── Datasets/       # Data used for training, testing, and analysis
-├── Models/         # Trained machine learning models and preprocessing artifacts
-├── Notebooks/      # Python scripts and Jupyter notebooks
-└── README.md       # Project documentation
+Python_Projects/
+Predicting_Employee_Attrition/
+App/          # Streamlit app (app.py)
+Models/       # trained model.pkl, scaler.pkl, columns.pkl
+Datasets/     # raw data and tiny demo CSVs
+Notebooks/    # exploratory and training notebooks
+requirements.txt
+README.md
