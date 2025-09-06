@@ -6,6 +6,10 @@ import joblib
 import plotly.express as px
 from pathlib import Path
 import os
+if os.path.exists(MODEL_PATH):
+    #load model
+else:
+    st.error("Model file not found")
 
 # ---------- Robust paths + diagnostics ----------
 APP_DIR = Path(__file__).resolve().parent          # /.../App
